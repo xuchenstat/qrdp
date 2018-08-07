@@ -185,13 +185,13 @@ double F0(double x, double nu) {
     double val;
     switch (dist) {
         case 2:
-            val = plogis(x, 0.0, 1.0, 1, 0);
+            val = unitFn(plogis(x, 0.0, 1.0, 1, 0));
             break;
         case 3:
-            val = punif(x, -1.0, 1.0, 1, 0);
+            val = unitFn(punif(x, -1.0, 1.0, 1, 0));
             break;
         default:
-            val = pt(x * qt(0.9, nu, 1, 0), nu, 1, 0);
+            val = unitFn(pt(x * qt(0.9, nu, 1, 0), nu, 1, 0));
             break;
     }
     return val;
@@ -223,14 +223,14 @@ double F0tail(double x, double nu) {
   double val;
   switch (dist) {
       case 2:
-          val = plogis(x, 0.0, 1.0, 1, 0);
+          val = unitFn(plogis(x, 0.0, 1.0, 1, 0));
           break;
       case 3:
           //val = punif(u, -1.0, 1.0, 1, 0);
-          val = pt(x, nu, 1, 0);
+          val = unitFn(pt(x, nu, 1, 0));
           break;
       default:
-          val = pt(x, nu, 1, 0);
+          val = unitFn(pt(x, nu, 1, 0));
           break;
   }
   return val;
@@ -1686,12 +1686,18 @@ void adMCMCvec(int niter, // total number of iterations
                         for(j = 0; j < n; j++) {
                           Unew[j][i] = resstore[j+1];
                           lcopnew[j] = gauCopDen(nresp, Unew[j], Cstore[iparC], 1);
+                          //Rprintvec("Unew = ", "%0.4f ", Unew[j], 2);
+                          //Rprintf("C = %0.4f ", Cstore[iparC][0][1]);
+                          //Rprintf("lcopnew = %0.4f ", lcopnew[j]);
                         }
                         lcopsumnew = sum(lcopnew, n);                        
                         lp_diff = lmglhnew[i] - lmglh[i] + lcopsumnew - lcopsum;
+                        //Rprintf("lp_diff = %0.4f ", lp_diff);
 			alpha[i][b] = exp(lp_diff); if(alpha[i][b] > 1.0) alpha[i][b] = 1.0;
                         //Rprintf("lh = %0.4f ", lmglhnew[i] - lmglh[i]);
                         //Rprintf("cop = %0.4f ", lcopsumnew - lcopsum);
+                        //Rprintf("copnew = %0.4f ", lcopsumnew);
+                        //Rprintf("\t");
                         //Rprintf("alpha = %0.4f ", alpha[i][b]);
 			if(log(runif(0.0, 1.0)) < lp_diff){      
 				ipar[i] = iparnew[i];
@@ -1706,7 +1712,7 @@ void adMCMCvec(int niter, // total number of iterations
 		}
                 //Rprintf("\n");
 }
-                //Rprintf("Current lp = %g\n", lpval);
+                //Rprintf("Current lp = %g\n", lpval);  
 
                 for(i = 0; i < nresp; i++){
                   for(diag[i] = 0.0, j = 0; j < n; j++){
