@@ -9,7 +9,6 @@ double log2(double x);
 double *vect(int n);
 int *ivect(int n);
 double **mymatrix(int nr, int nc);
-int **imymatrix(int nr, int nc);
 void Rprintvec(char *a, char *format, double *x, int n);
 void Rprintmat(char *a, char *format, double **x, int m, int n, int flip);
 void Rprintveci(char *a, char *format, int *x, int n);
@@ -35,10 +34,10 @@ void chol(double **R, int N, double tol, int *pivot, int *rank, int max_rank,
 		  double *d, double **A, int dopivoting, int padzero, double eps);
 void trisolve(double **R, int m, double *b, double *x, int transpose);
 void triprod(double **R, int m, int n, double *x, double *b, int transpose);
-void adMCMCvec(int niter, int thin, int n, int nparmg, int nresp, double **parmg, int nblocks, int ***blocks, int *blocks_size, 
-               double **C, double ***mu, double ****S, double **acpt_target, double decay, int refresh, double **lm, 
-               double temp, int **refresh_counter, int verbose, int ticker, double *parmgsamp, double *acptsamp, 
-               double *lpsamp, double *Csamp, double *acptCsamp, double *lcopsumsamp);
+void adMCMCgcs(int niter, int thin, int n, int max_gsize, int nparmg, double *parmg, double *lgtr, int ngroups, int **groups, int *groups_size, int nblocks, int **blocks, int *blocks_size,  double **mu, double ***S, double *theta, double *phi, double *acpt_target, double *acpt_gtarget,
+			double decay, int refresh, int refreshCop, double *lm, double *lmr, double temp,  
+			int *refresh_counter, int *refreshCop_counter, int verbose, int ticker,
+			double *parmgsamp, double *acptsamp, double *lpsamp, double *lgtrsamp, double *acptlgtrsamp, double *lmglhsamp);
 void transform_grid(double *w, double *v, int *ticks, double *dists);
 
 double find_tau_lo(double target, double baseline, double a, double b, double taua, double taub);
@@ -46,27 +45,15 @@ double find_tau_up(double target, double baseline, double a, double b, double ta
 double part_trape_rp(double loc, double a, double b, double taua, double taub);
 
 // new utility functions
-double prod(double *x, int n);
-void rwish(int df, int p, double **Sigma, double **S);
-void backsolve(int n, double **R, double **Rinv);
-void riwish(int df, int p, double **Sigma, double **Sinv);
-void mInprod(int n, int p, double **X, double **S, int transpose);
-void cov2cor(int p, double **Sigma, double **R);
-void solvePsd(int p, double **S, double **Sinv);
-double detPsd(int p, double **Sigma, int log, int inv);
-//double gauCopDen(int p, double *x, double **R, int log);
-double ***array3d(int d1, int d2, int d3);
-double lprior(int p, double **Cinvchol);
-double lgauCopDen(int p, double *x, double **Cinvchol);
-void corInvChol(int p, double **C, double **Cinvchol);
-
+double lgauCopDen(int p, double *x, double logitr);
+double lprior(int p, double logitr);
 //global integers
-int n, p, L, mid, m, nkap, ngrid, nresp/**/, nparmg, shrink, dist;
+int n, p, L, mid, m, nkap, ngrid, shrink, dist;
 
 //global constants
-double *taugrid, *akap, *bkap, *lpkap, asig, bsig, shrinkFactor, ***Agrid, ***Rgrid, *ldRgrid, *lpgrid, **x, **y/**/, *wt;
-int **cens/**/;
-int *zeta0_tick;
+double *taugrid, *akap, *bkap, *lpkap, asig, bsig, shrinkFactor, ***Agrid, ***Rgrid, *ldRgrid, *lpgrid, **x, *y, *wt;
+int *cens;
+int * zeta0_tick;
 
 //global variables (i.e memory overwritten multiple times)
 double *lb;
@@ -76,14 +63,8 @@ double *Q0Pos, **bPos, *Q0Neg, **bNeg;
 double *zeta0_dist;
 
 
-double **Rcop, **Zcop, **Qcop, *diagcop;
-double **Scop, **Rinvcop, *zcop, *zprod;
-int *pivot, *rank;
-
-
-// Define global pointers
-double *llvec, *pgvec, *rpvec, *lp;
-
+double *llvec, *pgvec, *rpvec, *lp, *zcop;
+double zsumsq, zsum, zsqsum, r, odds, deno; 
 
 //----------------------------Helper Functions-----------------------------//
 // called inside of other functions
@@ -187,13 +168,13 @@ double F0(double x, double nu) {
     double val;
     switch (dist) {
         case 2:
-            val = unitFn(plogis(x, 0.0, 1.0, 1, 0));
+            val = plogis(x, 0.0, 1.0, 1, 0);
             break;
         case 3:
-            val = unitFn(punif(x, -1.0, 1.0, 1, 0));
+            val = punif(x, -1.0, 1.0, 1, 0);
             break;
         default:
-            val = unitFn(pt(x * qt(0.9, nu, 1, 0), nu, 1, 0));
+            val = pt(x * qt(0.9, nu, 1, 0), nu, 1, 0);
             break;
     }
     return val;
@@ -243,7 +224,7 @@ double Q0tail(double u, double nu) {
     double val;
     switch (dist) {
         case 2:
-            val = qlogis(unitFn(u), 0.0, 1.0, 1, 0);
+            val = qlogis(u, 0.0, 1.0, 1, 0);
             break;
         case 3:
             val = qt(u, nu, 1, 0);
@@ -363,6 +344,117 @@ double ppFn(double *wknot, double *w, double *postgrid){
 	return lps;
 }
 
+
+void logpostFn_noX(double *par, double temp, int llonly, double *ll, double *pg, double *y, int *cens, double *lp, double *rp){
+    
+    int i, l, reach = 0, reach2 = 0;
+    double w0max, zeta0tot, lps0, gam0, sigma, nu, QPos, QPosold, QNeg, QNegold, sigmat1, sigmat2, den0;
+    
+    lps0 = ppFn0(par, w0, pg);
+    reach += m;
+    reach2 += ngrid;
+    
+    w0max = vmax(w0, L);
+    for(l = 0; l < L; l++) zeta0dot[l] = exp(w0[l] - w0max);
+    trape(zeta0dot + 1, taugrid + 1, L-2, zeta0 + 1, 0);
+    zeta0tot = zeta0[L-2];
+    zeta0[0] = 0.0; zeta0[L-1] = 1.0;
+    for(l = 1; l < L-1; l++) zeta0[l] = taugrid[1] + (taugrid[L-2] - taugrid[1]) * zeta0[l] / zeta0tot;
+    zeta0dot[0] = 0.0; zeta0dot[L-1] = 0.0;
+    for(l = 1; l < L-1; l++) zeta0dot[l] = (taugrid[L-2] - taugrid[1]) * zeta0dot[l] / zeta0tot;
+    
+    if(temp > 0.0){
+        for(i = 0; i < n; i++) {
+          ll[i] = log(0.0);
+          rp[i] = taugrid[mid];
+        }
+        
+        gam0 = par[reach++];
+        sigma = sigFn(par[reach++]);
+        nu = nuFn(par[reach++]);
+        //Rprintf("sigma = %g, nu = %g\n", sigma, nu);
+        
+        for(i = 0; i < n; i++) resLin[i] = y[i] - gam0;
+        //Rprintvec("resLin = ", "%g ", resLin, n);
+        
+        for(l = 0; l < L; l++) b0dot[l] = sigma * q0(zeta0[l], nu) * zeta0dot[l];
+        
+        trape(b0dot + mid, taugrid + mid, L - mid, Q0Pos, 0); Q0Pos[L-mid] = qt(1.0, 1.0, 1, 0);
+        trape(b0dot + mid, taugrid + mid, mid + 1, Q0Neg, 1); Q0Neg[mid+1] = qt(1.0, 1.0, 1, 0);
+        //Rprintvec("Q0Pos = ", "%g ", Q0Pos, L - mid + 1);
+        //Rprintvec("Q0Neg = ", "%g ", Q0Neg, mid + 2);
+        
+        sigmat1 = sigmat2 = sigma;
+        
+        //double h=0.5;
+        for(i = 0; i < n; i++){
+            if(resLin[i] == 0.0){
+                den0 = b0dot[mid];
+                ll[i] = -log(den0);
+            } else if(resLin[i] > 0.0){
+                l = 0;
+                QPosold = 0.0;
+                QPos = Q0Pos[l];
+                while(resLin[i] > QPos && l < L-mid-1){
+                    QPosold = QPos;
+                    l++;
+                    QPos = Q0Pos[l];
+                }
+                if(l == L - mid - 1) {
+                  rp[i] = F0tail(Q0tail(taugrid[L-2], nu) + (resLin[i] - QPosold)/sigmat1, nu) ;
+                  switch (cens[i]) {
+                    case 1: ll[i] = log(1.0 - rp[i]); break;
+                    case 2: ll[i] = log(rp[i]); break;
+                    default:ll[i] = lf0tail(Q0tail(taugrid[L-2], nu) + (resLin[i] - QPosold)/sigmat1, nu) - log(sigmat1); break;
+                  }
+                } else {
+                  rp[i] = find_tau_lo(resLin[i], QPosold, b0dot[mid+l-1], b0dot[mid+l], taugrid[mid+l-1], taugrid[mid+l]);
+                  switch (cens[i]) {
+                    case 1: ll[i] = log(1.0 - rp[i]); break;
+                    case 2: ll[i] = log(rp[i]); break;
+                    default:ll[i] = -log(part_trape_rp(rp[i], b0dot[mid+l-1], b0dot[mid+l], taugrid[mid+l-1], taugrid[mid+l])); break;
+                  }
+                }
+            } else {
+                l = 0;
+                QNegold = 0.0;
+                QNeg = Q0Neg[l];
+                while(resLin[i] < -QNeg && l < mid){
+                    QNegold = QNeg;
+                    l++;
+                    QNeg = Q0Neg[l];
+                }
+                if(l == mid) {
+                  rp[i] = F0tail(Q0tail(taugrid[1], nu) + (resLin[i] + QNegold)/sigmat2, nu) ;
+                  switch (cens[i]) {
+                    case 1: ll[i] = log(1.0 - rp[i]); break;
+                    case 2: ll[i] = log(rp[i]); break;
+                    default:ll[i] = lf0tail(Q0tail(taugrid[1], nu) + (resLin[i] + QNegold)/sigmat2, nu) - log(sigmat2); break;
+                  }
+                } else {
+                  rp[i] = find_tau_up(resLin[i], -QNegold, b0dot[mid-l], b0dot[mid-l+1], taugrid[mid-l], taugrid[mid-l+1]);
+                  switch (cens[i]) {
+                    case 1: ll[i] = log(1.0 - rp[i]); break;
+                    case 2: ll[i] = log(rp[i]); break;
+                    default:ll[i] = -log(part_trape_rp(rp[i], b0dot[mid-l], b0dot[mid-l+1], taugrid[mid-l], taugrid[mid-l+1])); break;
+                  }
+                }
+            }    
+            if(ll[i] == qt(1.0, 1.0, 1, 0)) Rprintf("i = %d, ll[i] = %g, resLin[i] = %g, l = %d\n", i, ll[i], resLin[i], l);
+        }
+    } else {
+        for(i = 0; i < n; i++) ll[i] = 0.0;
+    }
+    //Rprintvec("ll = ", "%g ", ll, n);
+    lp[0] = temp * inprod(ll, wt, n);
+    
+    if(!llonly){
+        //lp[0] += lps0 + dt(par[m*(p+1)], 1.0, 1) + dlogis(par[(m+1)*(p+1)], 0.0, 1.0, 1) + dlogis(par[(m+1)*(p+1)+1], 0.0, 1.0, 1);
+        //lp[0] += lps0 + dlogis(par[(m+1)*(p+1)], 0.0, 1.0, 1) + dlogis(par[(m+1)*(p+1)+1], 0.0, 1.0, 1);
+        lp[0] += lps0 + dlogis(par[m+2], 0.0, 1.0, 1);
+        //else lp[0] -= 0.5*sumsquares(par + m*(p+1) + 1, p)/9.0;
+    }	
+}
 
 
 // Function for evaluating the log posterior (case for log-likelihood only)
@@ -548,13 +640,44 @@ void logpostFn(double *par, double temp, int llonly, double *ll, double *pg, dou
 		//else lp[0] -= 0.5*sumsquares(par + m*(p+1) + 1, p)/9.0;
 	}
 }
+// End of evaluation of log posterior function
+
+
+// Define global pointers
 
 
 
+//---------Function for performing Bayesian Joint Quantile Regression--------//
 
-void BJQRvec(double *parmarg, double *Cor, double *xVar, double *yVar, int *status, double *weights, int *toShrink, double *hyper, int *dim, double *gridpars,
-          double *tauG, double *muVar, double *SVar, int *blocksVar, int *blocks_size, double *dmcmcpar, int *imcmcpar,
-          double *parmgsamp, double *acptsamp, double *lpsamp, double *Csamp, double *acptCsamp, double *lcopsumsamp, int *distribution){
+// Main function for evaluation of Bayesian Joint Quantile Regression
+// It sets up pointers and allocates memory to the places they point, it
+// unpackages concatenated vectors and matrices from R, and calls the
+// MCMC routine
+// Arguments/Inputs/Outputs in C and their equivalences in R:
+//  1 *par          R par
+//  2 *xVar         R x
+//  3 *yVar         R y
+//  4 *status       R cens
+//  5 *weights      R wt
+//  6 *toShrink     R shrink
+//  7 *hyper        R hyper      (asig, bsig, akap[1], bkap[1], lpkap[1], akap[2], bkap[2], lpkap[3],...)
+//  8 *dim          R dimpars    (n, p, L, mid index of median, m, ngrid, nkap, niter, thin)
+//  9 *gridpars     R gridmats   (one long vech of matrix (each column is vech A, vech R followed by ldRgrid and lpgrid corresponding to one lambda))
+// 10 *tauG         R tau.g
+// 11 *muVar        R muV=blocks.mu
+// 12 *SVar         R SV=blocks.S
+// 13 *blocksVar    R blocks=blocks.ix
+// 13 *blocks_size  R blocks.size
+// 14 *dmcmcpar     R dmcmc.par  ()
+// 15 *imcmcpar     R imcmcpar=imcmc.par
+// 16 *parsamp      R parsamp=nsamp*length(par)
+// 17 *acptsamp     R acptsamp=hsamp*nblocks
+// 18 *lpsamp       R lpsamp=length(nsamp)
+// 19 *distribution R fbase.choice=as.integer(fbase.choice)
+
+void BJQRgcs(double *parmg, double *lgtr, double *xVar, double *yVar, int *status, double *weights, int *toShrink, double *hyper, int *dim, double *gridpars,
+          double *tauG, double *muVar, double *SVar, double *theta, double *phi, int *blocksVar, int *blocks_size, int *groupsVar, int *groups_size, double *dmcmcpar, int *imcmcpar,
+          double *parmgsamp, double *acptsamp, double *lpsamp, double *lgtrsamp, double *acptlgtrsamp, double *lmglhsamp, int *distribution){
 
     // local constants setup
     // n: number of observations
@@ -565,15 +688,14 @@ void BJQRvec(double *parmarg, double *Cor, double *xVar, double *yVar, int *stat
     // ngrid: number of points on lambda grid
     // nkap: number of columns in kappa
     
-    int i, j, k, l;
+    int i, j, k, l, g;
     
-    int reach = 0, reach2 = 0;          //reach reused to move pointers along via reach++
+    int reach = 0;          //reach reused to move pointers along via reach++
     shrink = toShrink[0];
     n = dim[reach++]; p = dim[reach++]; L = dim[reach++]; mid = dim[reach++];
-    m = dim[reach++]; ngrid = dim[reach++]; nkap = dim[reach++]; 
+    m = dim[reach++]; ngrid = dim[reach++]; nkap = dim[reach++];
     dist = distribution[0];
-    int niter = dim[reach++], thin = dim[reach++], nresp = dim[reach++]; 
-    nparmg = (m+1)*(p+1) + 2;
+    int niter = dim[reach++], thin = dim[reach++], ngroups = dim[reach++]/**/, nparmg = (m+1)*(p+1) + 2;
     taugrid = tauG;
     
     asig = hyper[0]; bsig = hyper[1];
@@ -604,16 +726,11 @@ void BJQRvec(double *parmarg, double *Cor, double *xVar, double *yVar, int *stat
         lpgrid[i] = gridpars[reach++];
     }
     
-    x = mymatrix(n, p); y = mymatrix(nresp, n); cens = imymatrix(nresp, n); 
-    for(reach = 0, i = 0; i < n; i++){
-      x[i] = xVar + reach;
-      reach += p;
-    }
-    for(reach = 0, i = 0; i < nresp; i++){
-      y[i] = yVar + reach;
-      cens[i] = status + reach;
-      reach += n;
-    }
+    reach = 0;
+    x = mymatrix(n, p);
+    for(j = 0; j < p; j++) for(i = 0; i < n; i++) x[i][j] = xVar[reach++];
+    y = yVar;
+    cens = status;
     wt = weights;
     
     // Create pointers and space for objects that will be evaluated in lpFn
@@ -646,63 +763,40 @@ void BJQRvec(double *parmarg, double *Cor, double *xVar, double *yVar, int *stat
     zeta0_tick = ivect(L);
     zeta0_dist = vect(L);
     lp = vect(1);
-
+    
     // Unpack parameters related to running of MCMC
     int b;
-    int nblocks = imcmcpar[0], refresh = imcmcpar[1], verbose = imcmcpar[2], ticker = imcmcpar[3];
-    double temp = dmcmcpar[0], decay = dmcmcpar[1];
-    int **refresh_counter = imymatrix(nresp, nblocks);
-    double **acpt_target = mymatrix(nresp, nblocks), **lm = mymatrix(nresp, nblocks);
-    for(reach = 0, i = 0; i < nresp; i++){
-      refresh_counter[i] = imcmcpar + 4 + reach; 
-      acpt_target[i] = dmcmcpar + 2 + reach;
-      lm[i] = dmcmcpar + 2 + nresp*nblocks + reach;
-      reach += nblocks;
-    }/*imcmc.par dmcmc.par need to be changed*/
+    int nblocks = imcmcpar[0], refresh = imcmcpar[1], verbose = imcmcpar[2], ticker = imcmcpar[3], refreshCop = imcmcpar[4], max_gsize = imcmcpar[5]/**/;
+    int *refresh_counter = imcmcpar + 6, *refreshCop_counter = imcmcpar + 6 + nblocks/**/;
     
-  
+    double temp = dmcmcpar[0], decay = dmcmcpar[1];
+    double *acpt_target = dmcmcpar + 2, *lm = acpt_target + nblocks, *acpt_gtarget = lm + nblocks, *lmr = acpt_gtarget + ngroups/**/;
+    zcop = vect(max_gsize);
     //Initialize mu[b] and S[b] which get used in adaptive MCMC for each block's update
-    double ***mu = (double ***)R_alloc(nresp, sizeof(double **));
-    double ****S = (double ****)R_alloc(nresp, sizeof(double ***));
-    int ***blocks = (int ***)R_alloc(nresp, sizeof(int **));
+    double **mu = (double **)R_alloc(nblocks, sizeof(double *));
+    double ***S = (double ***)R_alloc(nblocks, sizeof(double **));
+    int **blocks = (int **)R_alloc(nblocks, sizeof(int *));
     
     int mu_point = 0, S_point = 0, blocks_point = 0;
-    for (i = 0; i < nresp; i++){
-    mu[i] = (double **)R_alloc(nblocks, sizeof(double *));
-    S[i] = (double ***)R_alloc(nblocks, sizeof(double **));
-    blocks[i] = (int **)R_alloc(nblocks, sizeof(int *));
-      for(b = 0; b < nblocks; b++){
-        mu[i][b] = muVar + mu_point; mu_point += blocks_size[b];
-        blocks[i][b] = blocksVar + blocks_point; blocks_point += blocks_size[b];
-        S[i][b] = (double **)R_alloc(blocks_size[b], sizeof(double *));
-        for(j = 0; j < blocks_size[b]; j++){
-          S[i][b][j] = SVar + S_point;
-          S_point += blocks_size[b];
+    for(b = 0; b < nblocks; b++){
+        mu[b] = muVar + mu_point; mu_point += blocks_size[b];        // Initialize mu with values passed from R
+        S[b] = (double **)R_alloc(blocks_size[b], sizeof(double *)); // Initialize  S with values passed from R
+        for(i = 0; i < blocks_size[b]; i++){
+            S[b][i] = SVar + S_point;
+            S_point += blocks_size[b];
         }
-       }
+        blocks[b] = blocksVar + blocks_point; blocks_point += blocks_size[b];  // blocks[b] holds indices of params needing to be updated in each block
     }
-    double **parmg = mymatrix(nresp, nparmg);
-    double **C = mymatrix(nresp, nresp);
-    for(reach = 0, reach2 = 0, i = 0; i < nresp; i++){ 
-      parmg[i] = parmarg + reach;
-      //Rprintvec("parmg = ", "%0.4f\n ", parmg[i], nparmg);
-      C[i] = Cor + reach2;
-      reach += nparmg;
-      reach2 += nresp;
+    
+    int groups_point = 0;
+    int **groups = (int **)R_alloc(ngroups, sizeof(int *));
+    for(g = 0; g < ngroups; g++){
+      groups[g] = groupsVar + groups_point; groups_point += groups_size[g];
     }
-
-    //Rprintf("all");
-    //Rprintmat("C = ", "%10g ", C, nresp, nresp, 0);
-    //Rprintmat("parmg = ", "%10g ", parmg, nresp, nparmg, 0);
-
+    
     //Call to adaptive MCMC code
-
-    adMCMCvec(niter, thin, n, nparmg, nresp, parmg, nblocks, blocks, blocks_size, C, mu, S, acpt_target, decay, refresh, lm, temp, 
-            refresh_counter, verbose, ticker, 
-            parmgsamp, acptsamp, lpsamp, Csamp, acptCsamp, lcopsumsamp);
-
+    adMCMCgcs(niter, thin, n, max_gsize, nparmg, parmg, lgtr, ngroups, groups, groups_size, nblocks, blocks, blocks_size, mu, S, theta, phi, acpt_target, acpt_gtarget, decay, refresh, refreshCop, lm, lmr, temp, refresh_counter, refreshCop_counter, verbose, ticker, parmgsamp, acptsamp, lpsamp, lgtrsamp, acptlgtrsamp, lmglhsamp);
 }
-
 
 
 
@@ -721,7 +815,7 @@ static int Stopping_Rule(double x0, double x1, double tolerance){
 }
 
 // Function to find max via the Search_Golden_Section algorithm
-void Max_Search_Golden_Section( double (*f)(double, double *, int *), double* a, double *fa, double* b, double* fb, double *y, int *cens, double tolerance){
+void Max_Search_Golden_Section( double (*f)(double, double*, int*), double* a, double *fa, double* b, double* fb, double *y, int *cens, double tolerance){
 	static const double lambda = 0.5 * (sqrt5 - 1.0);
 	static const double mu = 0.5 * (3.0 - sqrt5);         // = 1 - lambda
 	double x1;
@@ -769,11 +863,19 @@ int sig_pos;
 double *par0;
 
 // Shortened evaluation of logpostFn; defaults to temp==1, exclusion of prior on nu
+// Function to be maximized over sigma when finding starting sigma values
+double lpFn2_noX(double sigma, double *y, int *cens){
+    par0[sig_pos] = sigma;
+    logpostFn_noX(par0, 1.0, 0, llvec, pgvec, y, cens, lp, rpvec);
+    return(lp[0]);
+}
+
 double lpFn2(double sigma, double *y, int *cens){
 	par0[sig_pos] = sigma;
 	logpostFn(par0, 1.0, 0, llvec, pgvec, y, cens, lp, rpvec);
         return(lp[0]);
 }
+
 
 // Initialization function
 // Performs many of same unpacking functionalities that BJQR does but additionally
@@ -822,9 +924,9 @@ void INIT(double *par, double *xVar, double *yVar, int *status, double *weights,
 	reach = 0;
 	x = mymatrix(n, p);
 	for(j = 0; j < p; j++) for(i = 0; i < n; i++) x[i][j] = xVar[reach++];
-        int *cens = status;
+	cens = status;
         wt = weights;
-
+	
 	lb = vect(10);
 	wgrid = mymatrix(ngrid, L);
 	lw = vect(nkap);
@@ -869,7 +971,87 @@ void INIT(double *par, double *xVar, double *yVar, int *status, double *weights,
 
 
 
+// Function to calculate post-hoc the Deviance at each iteration; 
+// called within the summary.qrjoint function in R
+void DEV(double *par, double *xVar, double *yVar, int *status, double *weights, int *toShrink, double *hyper, int *dim, double *gridpars, double *tauG, double *devsamp, double *llsamp, double *pgsamp, double *rpsamp, int *distribution){
+	
+	int i, j, k, l;
+	
+	int reach = 0;
+	shrink = toShrink[0];
+	n = dim[reach++]; p = dim[reach++]; L = dim[reach++]; mid = dim[reach++]; 
+	m = dim[reach++]; ngrid = dim[reach++]; nkap = dim[reach++];
+	dist = distribution[0];
+	int niter = dim[reach++], npar = (m+1)*(p+1) + 2;
+	
+	taugrid = tauG;
+	asig = hyper[0]; bsig = hyper[1];
+	akap = vect(nkap); bkap = vect(nkap); lpkap = vect(nkap);
+	for(reach = 2, i = 0; i < nkap; i++){
+		akap[i] = hyper[reach++];
+		bkap[i] = hyper[reach++];
+		lpkap[i] = hyper[reach++];
+	}
+	shrinkFactor = shrinkFn((double)p);
+	
+	reach = 0; 
+	Agrid = (double ***)R_alloc(ngrid, sizeof(double **));
+	Rgrid = (double ***)R_alloc(ngrid, sizeof(double **));
+	ldRgrid = vect(ngrid);
+	lpgrid = vect(ngrid);
+	
+	for(i = 0; i < ngrid; i++){
+		Agrid[i] = mymatrix(L, m);
+		for(l = 0; l < L; l++) for(k = 0; k < m; k++) Agrid[i][l][k] = gridpars[reach++];
+		
+		Rgrid[i] = mymatrix(m, m);
+		for(k = 0; k < m; k++) for(l = 0; l < m; l++) Rgrid[i][l][k] = gridpars[reach++];
+		
+		ldRgrid[i] = gridpars[reach++];
+		lpgrid[i] = gridpars[reach++];
+	}
+	
+	reach = 0;
+	x = mymatrix(n, p);
+	for(j = 0; j < p; j++) for(i = 0; i < n; i++) x[i][j] = xVar[reach++];
+	cens = status;
+        wt = weights;
+	
+	lb = vect(10);
+	wgrid = mymatrix(ngrid, L);
+	lw = vect(nkap);
+	llgrid = vect(ngrid);
+	zknot = vect(m);
+        wMat = mymatrix(p, L);
+	vMat = mymatrix(p, L);
+	vTilde = mymatrix(p, L);
+	w0 = vect(L);
+	zeta0dot = vect(L);
+	zeta0 = vect(L);
+	vNormSq = vect(L);
+	a = mymatrix(L, n);
+	aX = vect(L);
+	gam = vect(p);
+	xLin = vect(n);
+	resLin = vect(n);
+	b0dot = vect(L);
+	bdot = mymatrix(p, L);
+	Q0Pos = vect(L);
+	bPos = mymatrix(p, L);
+	Q0Neg = vect(L);
+	bNeg = mymatrix(p, L);
+        zeta0_tick = ivect(L);
+        zeta0_dist = vect(L);
+	lp = vect(1);
 
+	reach = 0;
+	int iter, reach2 = 0, reach3 = 0;
+	for(iter = 0; iter < niter; iter++){
+                logpostFn(par + reach, 1.0, 1, llsamp + reach2, pgsamp + reach3, yVar, cens, lp, rpsamp + reach2);
+		devsamp[iter] = -2.0 * lp[0];
+		reach += npar; reach2 += n; reach3 += ngrid * (p+1);
+	}
+}
 
 
 //----------------------------------------------------------------------------//
@@ -914,7 +1096,7 @@ void Rprintvec(char *a, char *format, double *x, int n){
 	Rprintf("\n");
 }
 
-// Prints a matrix on screen with starting *a as character tag. "%10g "
+// Prints a matrix on screen with starting *a as character tag.
 void Rprintmat(char *a, char *format, double **x, int m, int n, int flip){
 	int i, j;
 	Rprintf("%s\n", a);
@@ -933,28 +1115,6 @@ void Rprintveci(char *a, char *format, int *x, int n){
 	for(i = 0; i < n; i++)
 		Rprintf(format, x[i]);
 	Rprintf("\n");
-}
-
-// Makes set of pointers and allocates memory for set of vectors of doubles (ie a matrix)
-int **imymatrix(int nr, int nc){
-	int   i;
-	int **m;	
-	m = (int **) R_alloc(nr, sizeof(int *));
-	for (i = 0; i < nr; i++)
-		m[i] = (int *) R_alloc(nc, sizeof(int));
-	return m;
-}
-
-double ***array3d(int d1, int d2, int d3){
-	int   i, j;
-	double ***m = (double ***) R_alloc(d1, sizeof(double **));
-	for (i = 0; i < d1; i++){
-          m[i] = (double **) R_alloc(d2, sizeof(double *));
-          for (j = 0; j < d2; j++){
-            m[i][j] = (double *) R_alloc(d3, sizeof(double));
-          }
-        }   
-	return m;
 }
 
 
@@ -1364,259 +1524,220 @@ void triprod(double **R, int m, int n, double *x, double *b, int transpose){
 	}
 }
 
-
-void adMCMCvec(int niter, // total number of iterations
-               int thin,  // only store every [thin]th sample, totally get niter/thin posterior samples 
-               int n, // number of observations 
-               int nparmg, // number of parameters associated with marginal likelihood for each response = (m+1)*(p+1) + 2
-               int nresp, // number of responses in each observation
-               double **parmg, // initial parameters associated with marginal likelihood [nresp*nparmg matrix]
-               int nblocks, // number of blocks for every response
-               int ***blocks, // 'ragged array' containing indices of params to be updated in block [b][i] is [block #][goes from 0:block_size[b]]
-               int *blocks_size, 
-               double **C, // initial correlation matrix [nresp*nresp] 
-               double ***mu, // nresp -> nblocks -> blocks_size
-               double ****S, // 
-               double **acpt_target, 
-	       double decay, 
-               int refresh, 
-               double **lm /*nresp by nblocks*/, 
-               double temp, 
-	       int **refresh_counter/* change to a matrix*/, 
-               int verbose, 
-               int ticker, 
-               /*double lpFn(double *, double),*/ 
-	       double *parmgsamp, // nsamp*nresp*nparmg
-               double *acptsamp, // nsamp*nresp*nblocks
-               double *lpsamp,  // nsamp
-               double *Csamp,  // nsamp*[nresp*(nresp-1)/2]
-               double *acptCsamp, // nsamp
-               double *lcopsumsamp // nsamp
-){
-  int i, j, k, b;
-  double ****R = (double ****)R_alloc(nresp, sizeof(double ***));
-  int **blocks_pivot = (int **)R_alloc(nblocks, sizeof(double *)), *blocks_rank = ivect(nblocks);
-  double *blocks_d = vect(nparmg); //npar is different from before
-  for(b = 0; b < nblocks; b++) blocks_pivot[b] = ivect(blocks_size[b]);
-  for(i = 0; i < nresp; i++){
-    R[i] = (double ***)R_alloc(nblocks, sizeof(double **));
-    for(b = 0; b < nblocks; b++){
-      R[i][b] = mymatrix(blocks_size[b], blocks_size[b]);
-      chol(R[i][b], blocks_size[b], 1.0e-8, blocks_pivot[b], blocks_rank + b, blocks_size[b], blocks_d, S[i][b], 0, 0, 1.0e-10);
-    //  Rprintmat("R = ", "%10g ", R[i][b], blocks_size[b], blocks_size[b],1);
-  }
-}
-  int **chunk_size = imymatrix(nresp, nblocks); 
-  double **acpt_chunk = mymatrix(nresp, nblocks);
-  double ***parbar_chunk = (double ***)R_alloc(nresp, sizeof(double **));
-  for(i = 0; i < nresp; i++) parbar_chunk[i] = (double **)R_alloc(nblocks, sizeof(double *));
-  double **alpha = mymatrix(nresp, nblocks), alphaCop;
-  double **frac = mymatrix(nresp, nblocks);
-  //double **ppick = mymatrix(nresp, nblocks);  
-
-  for(i = 0; i < nresp; i++){
-  for(b = 0; b < nblocks; b++){
-		chunk_size[i][b] = 0;
-		acpt_chunk[i][b] = 0.0;
-		parbar_chunk[i][b] = vect(blocks_size[b]);		
-		for(j = 0; j < blocks_size[b]; j++) parbar_chunk[i][b][j] = 0.0;		
-		frac[i][b] = sqrt(1.0 / ((double)refresh_counter[i][b] + 1.0));
-  }
-}
-  
-
-  Rcop = mymatrix(nresp, nresp); Zcop = mymatrix(nresp, nresp); Qcop = mymatrix(nresp, nresp); diagcop = vect(nresp);
-  Scop = mymatrix(nresp, nresp); Rinvcop = mymatrix(nresp, nresp); zcop = vect(nresp); zprod = vect(nresp);
-  pivot = ivect(nresp); rank = ivect(1);
+//----------------------------------------------------------------------------//
+//-----------------------Adaptive MCMC Using MVN proposals--------------------//
+//-------------------------and overlapping block updates----------------------//
+//----------------------------------------------------------------------------//
 
 
-  double lp_diff, lcop_diff, lpr, lprnew, *lmglh = vect(nresp), *lmglhnew = vect(nresp), *lcop = vect(n), *lcopnew = vect(n);
-  double ***parmgstore = array3d(2, nresp, nparmg), *par_incr = vect(nparmg), *zsamp = vect(nparmg), **U = mymatrix(n, nresp), **Unew = mymatrix(n, nresp), ***Cstore = array3d(2, nresp, nresp), ***Cicstore = array3d(2, nresp, nresp), **Z = mymatrix(n, nresp), **Zstar = mymatrix(n, nresp), *diag = vect(nresp), **Omega = mymatrix(nresp, nresp), **Sigma = mymatrix(nresp, nresp);
-  int *ipar = ivect(nresp), *iparnew = ivect(nresp), iparC = 0, iparCnew = 1;
+void adMCMCgcs(int niter, int thin, int n, int max_gsize, int nparmg, double *parmg, double *lgtr, int ngroups, int **groups, int *groups_size, int nblocks, int **blocks, int *blocks_size,  double **mu, double ***S, double *theta, double *phi, double *acpt_target, double *acpt_gtarget,
+			double decay, int refresh, int refreshCop, double *lm, double *lmr, double temp,  
+			int *refresh_counter, int *refreshCop_counter, int verbose, int ticker,
+			double *parmgsamp, double *acptsamp, double *lpsamp, double *lgtrsamp, double *acptlgtrsamp, double *lmglhsamp){
 
-  
+	
+	// Get cholesky decomps of each block's S (proposal Gaussian covariance), store in R[b]
+	// Reserve memory for blocks_rank, plock_pivot, and blocks_d.  Space needed for decomps
+	int b, i, j, g;
+	double ***R = (double ***)R_alloc(nblocks, sizeof(double **));
+	int **blocks_pivot = (int **)R_alloc(nblocks, sizeof(double *)), *blocks_rank = ivect(nblocks);
+	double *blocks_d = vect(nparmg);
+	for(b = 0; b < nblocks; b++){
+		R[b] = mymatrix(blocks_size[b], blocks_size[b]);
+		blocks_pivot[b] = ivect(blocks_size[b]);
+		chol(R[b], blocks_size[b], 1.0e-8, blocks_pivot[b], blocks_rank + b, blocks_size[b], blocks_d, S[b], 0, 0, 1.0e-10);
+	}
+	
+	// Reserve memory (via pointers) for
+	int *chunk_size = ivect(nblocks);     // holds period of adaptive update for each block
+	double *acpt_chunk = vect(nblocks);   // acceptance rate
+	double **parbar_chunk = (double **)R_alloc(nblocks, sizeof(double *));
+	double *alpha = vect(nblocks);
+	double *frac = vect(nblocks);
+        // copula part
+        int *chunk_gsize = ivect(ngroups);
+      	double *acpt_group = vect(ngroups), *lgtrbar = vect(ngroups), *alphaCop = vect(ngroups), *fracCop = vect(ngroups);
+ 
+	
+	for(b = 0; b < nblocks; b++){
+		chunk_size[b] = 0;
+		acpt_chunk[b] = 0.0;
+		parbar_chunk[b] = vect(blocks_size[b]);		
+		for(i = 0; i < blocks_size[b]; i++) parbar_chunk[b][i] = 0.0;		
+		frac[b] = sqrt(1.0 / ((double)refresh_counter[b] + 1.0));
+	}
+	
+        for(g = 0; g < ngroups; g++){
+		chunk_gsize[g] = 0;
+		acpt_group[g] = 0.0;
+		lgtrbar[g] = 0.0;		
+		fracCop[g] = sqrt(1.0 / ((double)refreshCop_counter[g] + 1.0));
+	}
 
-  //Rprintvec("parmg1 = ", "%0.4f\n ", parmg[0], nparmg);
-  //Rprintvec("parmg2 = ", "%0.4f\n ", parmg[1], nparmg);
-  for(i = 0; i < nresp; i++){
-    ipar[i] = 0; iparnew[i] = 1;
-    for(j = 0; j < nparmg; j++) parmgstore[ipar[i]][i][j] = parmg[i][j];
-    Cstore[iparC][i][i] = 1.0;
-    for(j = i+1; j < nresp; j++) {Cstore[iparC][i][j] = C[i][j]; Cstore[iparC][j][i] = Cstore[iparC][i][j];}    
-  }
-  //Rprintvec("parmg1 = ", "%0.4f\n ", parmgstore[0][0], nparmg);
-  //Rprintvec("parmg2 = ", "%0.4f\n ", parmgstore[0][1], nparmg);
-  for(i = 0; i < nresp; i++){ 
-    logpostFn(parmgstore[ipar[i]][i], temp, 0, llvec, pgvec, y[i], cens[i], lp, rpvec); /*need to check*/
-    lmglh[i] = lp[0];
-    for(j = 0; j < n; j++) {U[j][i] = rpvec[j]; Unew[j][i] = rpvec[j];} 
-  }
-  
-  corInvChol(nresp, Cstore[iparC], Cicstore[iparC]);
 
-  for(i = 0; i < n; i++) lcop[i] = lgauCopDen(nresp, U[i], Cicstore[iparC]);
-  double lcopsum = sum(lcop, n), lcopsumnew;
-  lpr = lprior(nresp, Cicstore[iparC]);
+	double lp_diff, lcop_diff, lmglh, lmglhnew, *lcop = vect(ngroups), *lcopnew = vect(ngroups), *lpr = vect(ngroups), *lprnew = vect(ngroups);
+double *lcpost = vect(ngroups), *lcpostnew = vect(ngroups);
+	double **parmgstore = mymatrix(2, nparmg), *par_incr = vect(nparmg), *zsamp = vect(nparmg), **lgtrstore = mymatrix(2, ngroups);
+        double ***U = (double ***)R_alloc(2, sizeof(double **));
+        for(i = 0; i < 2; i++){
+          U[i] = (double **)R_alloc(ngroups, sizeof(double *));
+          for(g = 0; g < ngroups; g++) U[i][g] = (double *)R_alloc(groups_size[g], sizeof(double));
+        }
 
-  
-  if(verbose) Rprintf("Initial lp = %g\n", sum(lmglh, nresp) + lcopsum + lpr);
-  
-  int iter, store_lp = 0, store_par = 0, store_acpt = 0, store_lcop = 0, store_C = 0, store_acptC = 0;
-  double **alpha_run = mymatrix(nresp, nblocks), chs, lambda;
-	//	int run_counter = 0;
-  int **run_counter = imymatrix(nresp, nblocks);
-  for(i = 0; i < nresp; i++) for(b = 0; b < nblocks; b++) {alpha_run[i][b] = 0.0; run_counter[i][b] = 0;}
+	int ipar = 0, iparnew = 1, *iparr = ivect(ngroups), *iparrnew = ivect(ngroups);
 
+	for(i = 0; i < nparmg; i++) parmgstore[ipar][i] = parmg[i];
+        for(g = 0; g < ngroups; g++){
+          iparr[g] = 0; iparrnew[g] = 1;
+          lgtrstore[iparr[g]][g] = lgtr[g];
+        }
 
-  
-  GetRNGstate();
-  for(iter = 0; iter < niter; iter++){
-                            //Rprintf("iter = %i ", iter);
-    for(i = 0; i < nresp; i++){
+	logpostFn(parmgstore[ipar], temp, 0, llvec, pgvec, y, cens, lp, rpvec);
+	lmglh = lp[0];
+        //for(i = 0; i < n; i++) U[i] = resstore[i+1];
+        for(g = 0; g < ngroups; g++){
+          for(i = 0; i < groups_size[g]; i++) U[ipar][g][i] = rpvec[groups[g][i]];
+          lcop[g] = lgauCopDen(groups_size[g], U[ipar][g], lgtrstore[iparr[g]][g]);
+        }
+     
+        double lcopsum = sum(lcop, ngroups), lcopsumnew;
+        for(g = 0; g < ngroups; g++){
+          lpr[g] = lprior(groups_size[g], lgtrstore[iparr[g]][g]);
+          lcpost[g] = lcop[g] + lpr[g];
+        }
+       
+        if(verbose) Rprintf("Initial lp = %g\n", lmglh + sum(lcpost, ngroups));
+	int iter, store_lp = 0, store_parmg = 0, store_acpt = 0, store_lmglh = 0, store_lgtr = 0, store_acptlgtr = 0;
+	double *alpha_run = vect(nblocks), *alphaCop_run = vect(ngroups), chs, lambda;
+        int *run_counter = ivect(nblocks), *runCop_counter = ivect(ngroups);
+	for(b = 0; b < nblocks; b++) {alpha_run[b] = 0.0; run_counter[b] = 0;}
+	for(g = 0; g < ngroups; g++) {alphaCop_run[g] = 0.0; runCop_counter[g] = 0;}
+	
+	GetRNGstate();
+	for(iter = 0; iter < niter; iter++){
 		for(b = 0; b < nblocks; b++){
-			chunk_size[i][b]++;
-                        //Rprintf("chunk_size = %i\n", chunk_size[i][b]);
-			for(j = 0; j < blocks_size[b]; j++) zsamp[j] = rnorm(0.0, 1.0);
-                        //Rprintf("blocks_size = %i\n", blocks_size[b]);
-			triprod(R[i][b], blocks_size[b], blocks_size[b], zsamp, par_incr, 1);
-                        //Rprintvec("par_incr = ", "%0.4f ", par_incr, blocks_size[b]);
-                        //Rprintmat("R = ", "%10g ", R[i][b], blocks_size[b], blocks_size[b],1);
-			for(j = 0; j < nparmg; j++) parmgstore[iparnew[i]][i][j] = parmgstore[ipar[i]][i][j];
-                        //Rprintvec("parmg = ", "%0.4f ", parmgstore[ipar][i], nparmg);
-			lambda = lm[i][b] * sqrt(3.0 / rgamma(3.0, 1.0));
-                        //Rprintf("lambda = %0.4f ", lambda);
-                        //Rprintf("lm = %0.4f ", lm[i][b]);
-			for(j = 0; j < blocks_size[b]; j++) parmgstore[iparnew[i]][i][blocks[i][b][j]] += lambda * par_incr[j];
-                        //Rprintf("ipar = %i ", ipar);
-                        //Rprintf("iparnew = %i\n ", iparnew);
-                        //Rprintveci("blocks = ", "%i ", blocks[i][b], blocks_size[b]);
-                        //Rprintvec("parmgo = ", "%0.4f ", parmgstore[ipar[i]][i], nparmg);
-                        //Rprintvec("parmgn = ", "%0.4f ", parmgstore[iparnew[i]][i], nparmg);
-                        logpostFn(parmgstore[iparnew[i]][i], temp, 0, llvec, pgvec, y[i], cens[i], lp, rpvec);
-                        lmglhnew[i] = lp[0];
-                        //Rprintf("lmglhnew = %0.4f ", lmglhnew[i]);
-                        for(j = 0; j < n; j++) {
-                          Unew[j][i] = rpvec[j];
-                          lcopnew[j] = lgauCopDen(nresp, Unew[j], Cicstore[iparC]);
-                          //Rprintvec("Unew = ", "%0.4f ", Unew[j], 2);
-                          //Rprintf("C = %0.4f ", Cstore[iparC][0][1]);
-                          //Rprintf("lcopnew = %0.4f ", lcopnew[j]);
+			chunk_size[b]++;
+			for(i = 0; i < blocks_size[b]; i++) zsamp[i] = rnorm(0.0, 1.0);
+			triprod(R[b], blocks_size[b], blocks_size[b], zsamp, par_incr, 1);
+			for(i = 0; i < nparmg; i++) parmgstore[iparnew][i] = parmgstore[ipar][i];
+			lambda = lm[b] * sqrt(3.0 / rgamma(3.0, 1.0));
+			for(i = 0; i < blocks_size[b]; i++) parmgstore[iparnew][blocks[b][i]] += lambda * par_incr[i];
+                        logpostFn(parmgstore[iparnew], temp, 0, llvec, pgvec, y, cens, lp, rpvec);
+                        lmglhnew = lp[0];
+                        for(g = 0; g < ngroups; g++){
+                          for(i = 0; i < groups_size[g]; i++) U[iparnew][g][i] = rpvec[groups[g][i]];
+                          lcopnew[g] = lgauCopDen(groups_size[g], U[iparnew][g], lgtrstore[iparr[g]][g]);
                         }
-                        lcopsumnew = sum(lcopnew, n);                        
-                        lp_diff = lmglhnew[i] - lmglh[i] + lcopsumnew - lcopsum;
-                        //Rprintf("lp_diff = %0.4f ", lp_diff);
-			alpha[i][b] = exp(lp_diff); if(alpha[i][b] > 1.0) alpha[i][b] = 1.0;
-                        //Rprintf("lh = %0.4f ", lmglhnew[i] - lmglh[i]);
-                        //Rprintf("cop = %0.4f ", lcopsumnew - lcopsum);
-                        //Rprintf("copnew = %0.4f ", lcopsumnew);
-                        //Rprintf("\t");
-                        //Rprintf("alpha = %0.4f ", alpha[i][b]);
-			if(log(runif(0.0, 1.0)) < lp_diff){      
-				ipar[i] = iparnew[i];
-				iparnew[i] = !ipar[i];
-                                lmglh[i] = lmglhnew[i];
+                        lcopsumnew = sum(lcopnew, ngroups);
+			lp_diff = lmglhnew - lmglh + lcopsumnew - lcopsum;
+			alpha[b] = exp(lp_diff); if(alpha[b] > 1.0) alpha[b] = 1.0;
+			if(runif(0.0, 1.0) < alpha[b]){      
+				ipar = iparnew;
+				iparnew = !ipar;
+                                lmglh = lmglhnew;
                                 lcopsum = lcopsumnew;
-                                for(j = 0; j < n; j++) U[j][i] = Unew[j][i];
-			} else {for(j = 0; j < n; j++) Unew[j][i] = U[j][i];}		
-			alpha_run[i][b] = ((double)run_counter[i][b] * alpha_run[i][b] + alpha[i][b]) / ((double)(run_counter[i][b] + 1.0));
-			run_counter[i][b]++;
+                                for(g = 0; g < ngroups; g++) lcop[g] = lcopnew[g];
+			}			
+			alpha_run[b] = ((double)run_counter[b] * alpha_run[b] + alpha[b]) / ((double)(run_counter[b] + 1.0));
+			run_counter[b]++;
 		}
-                //Rprintf("\n");
-}
-                //Rprintf("Current lp = %g\n", lpval);  
 
-                for(i = 0; i < nresp; i++){
-                  for(diag[i] = 0.0, j = 0; j < n; j++){
-                    Z[j][i] = qnorm(U[j][i], 0.0, 1.0, 1, 0);
-                    diag[i] += Z[j][i] * Z[j][i];
-                  }
-                  diag[i] = 1.0/sqrt(diag[i]);
-                  for(j = 0; j < n; j++){
-                    Zstar[j][i] = diag[i] * Z[j][i];
-                  }
-                }
-                mInprod(n, nresp, Zstar, Omega, 0);
-                riwish(n, nresp, Omega, Sigma);
-                cov2cor(nresp, Sigma, Cstore[iparCnew]);
-                corInvChol(nresp, Cstore[iparCnew], Cicstore[iparCnew]);
-                lprnew = lprior(nresp, Cicstore[iparCnew]);
-                lcop_diff = lprnew - lpr;
-                alphaCop = exp(-((double)nresp + 1.0)*lcop_diff); 
-                if(alphaCop > 1.0) alphaCop = 1.0;
-		if(runif(0.0, 1.0) < alphaCop){
-                  iparC = iparCnew;
-                  iparCnew = !ipar;
-                  lpr = lprnew;
-                  for(lcopsum = 0, j = 0; j < n; j++) lcopsum += lgauCopDen(nresp, U[j], Cicstore[iparC]);
-                }
-               
+
+                for(g = 0; g < ngroups; g++){
+                  lcpost[g] = lcop[g] + lpr[g];
+                  chunk_gsize[g]++;
+                  zsamp[0] = rnorm(0.0, 1.0);
+                  lgtrstore[iparrnew[g]][g] = lgtrstore[iparr[g]][g] + lmr[g]*zsamp[0]*phi[g];
+                  lcopnew[g] = lgauCopDen(groups_size[g], U[ipar][g], lgtrstore[iparrnew[g]][g]);
+                  lprnew[g] = lprior(groups_size[g], lgtrstore[iparrnew[g]][g]);
+                  lcpostnew[g] = lcopnew[g] + lprnew[g];
+                  //Rprintf("lgtr = %g", lgtrstore[iparrnew[g]][g]);                  
+                  //Rprintf("lcopnew = %g", lcopnew[g]);
+                  //Rprintf("lprnew = %g", lprnew[g]);
+                  //Rprintf("\n");
+                  lcop_diff = lcpostnew[g] - lcpost[g];
+                  alphaCop[g] = exp(lcop_diff); if(alphaCop[g] > 1.0) alphaCop[g] = 1.0;
+                  if(runif(0.0, 1.0) < alphaCop[g]){      
+				iparr[g] = iparrnew[g];
+				iparrnew[g] = !iparr[g];
+                                lcop[g] = lcopnew[g];
+                                lpr[g] = lprnew[g];
+                                lcpost[g] = lcpostnew[g];
+		  }
+                  alphaCop_run[g] = ((double)runCop_counter[g] * alphaCop_run[g] + alphaCop[g]) / ((double)(runCop_counter[g] + 1.0));
+		  runCop_counter[g]++;
+                 }
+                 lcopsum = sum(lcop, ngroups);
                 
-                if((iter + 1) % thin == 0){
-		  lpsamp[store_lp++] = sum(lmglh, nresp) + lcopsum + lpr /**/;
-                  lcopsumsamp[store_lcop++] = lcopsum;
-	          for(i = 0; i < nresp; i++){ 
-                    for(j = 0; j < nparmg; j++) parmgsamp[store_par++] = parmgstore[ipar[i]][i][j];
-                    for(b = 0; b < nblocks; b++) acptsamp[store_acpt++] = alpha[i][b];
-                    //Rprintvec("alpha = ", "%0.4f\n ", alpha[i], nblocks);
-                    for(j = i + 1; j < nresp; j++) Csamp[store_C++] = Cstore[iparC][i][j];  
-                  }
-                  acptCsamp[store_acptC++] = alphaCop; 
+		if((iter + 1) % thin == 0){
+			lpsamp[store_lp++] = lmglh + sum(lcpost, ngroups);
+                        lmglhsamp[store_lmglh++] = lmglh;
+			for(i = 0; i < nparmg; i++) parmgsamp[store_parmg++] = parmgstore[ipar][i];
+			for(b = 0; b < nblocks; b++) acptsamp[store_acpt++] = alpha[b];
+                        for(g = 0; g < ngroups; g++) {
+                          lgtrsamp[store_lgtr++] = lgtrstore[iparr[g]][g];
+                          acptlgtrsamp[store_acptlgtr++] = alphaCop[g];
+                        }           
 		}
 		
 		if(verbose){
 			if(niter < ticker || (iter + 1) % (niter / ticker) == 0){
-				Rprintf("iter = %d, lp = %g ", iter + 1, sum(lmglh, nresp) + lcopsum + lpr);
-				//Rprintvec("acpt = ", "%0.2f ", alpha_run, nblocks);
-                                for(i = 0; i < nresp; i++){ 
-				  for(b = 0; b < nblocks; b++){
-					alpha_run[i][b] = 0.0;
-					run_counter[i][b] = 0;
-				  }
-			        }
-                        }
-		}
-                   
-	        for(i = 0; i < nresp; i++){ 
-		for(b = 0; b < nblocks; b++){
-			chs = (double) chunk_size[i][b]; if(chs < 1.0) chs = 1.0;
-			acpt_chunk[i][b] +=  (alpha[i][b] - acpt_chunk[i][b]) / chs;
-			for(j = 0; j < blocks_size[b]; j++)
-				parbar_chunk[i][b][j] += (parmgstore[ipar[i]][i][blocks[i][b][j]] - parbar_chunk[i][b][j]) / chs;  
-			
-			if(chunk_size[i][b] == refresh * blocks_size[b]){
-				refresh_counter[i][b]++;
-				frac[i][b] = sqrt(1.0 / ((double)refresh_counter[i][b] + 1.0));
-				for(j = 0; j < blocks_size[b]; j++){
-					for(k = 0; k < j; k++){
-						S[i][b][j][k] = (1.0 - frac[i][b]) * S[i][b][j][k] + frac[i][b] * (parbar_chunk[i][b][j] - mu[i][b][j]) * (parbar_chunk[i][b][k] - mu[i][b][k]);
-						S[i][b][k][j] = S[i][b][j][k];
-					}
-					S[i][b][j][j] = (1.0 - frac[i][b]) * S[i][b][j][j] + frac[i][b] * (parbar_chunk[i][b][j] - mu[i][b][j]) * (parbar_chunk[i][b][j] - mu[i][b][j]);
+				Rprintf("iter = %d, lp = %g ", iter + 1, lmglh + sum(lcpost, ngroups));
+				Rprintvec("acpt = ", "%0.2f ", alpha_run, nblocks);
+				for(b = 0; b < nblocks; b++){
+					alpha_run[b] = 0.0;
+					run_counter[b] = 0;
 				}
-				chol(R[i][b], blocks_size[b], 1.0e-8, blocks_pivot[b], blocks_rank + b, blocks_size[b], blocks_d, S[i][b], 0, 0, 1.0e-10);
-                         for(j = 0; j < blocks_size[b]; j++){
-                                mu[i][b][j] += frac[i][b] * (parbar_chunk[i][b][j] - mu[i][b][j]);
-                                parbar_chunk[i][b][j] = 0.0;
-                         }
-                                lm[i][b] *= exp(frac[i][b] * (acpt_chunk[i][b] - acpt_target[i][b]));
-                                //Rprintf("frac = %0.4f\n ", frac[i][b]);
-				acpt_chunk[i][b] = 0.0;
-				chunk_size[i][b] = 0;
+                                for(g = 0; g < ngroups; g++){
+                                        alphaCop_run[g] = 0.0;
+		                        runCop_counter[g] = 0;
 			}
 		}
-	}
-
 }
+		
+		for(b = 0; b < nblocks; b++){
+			chs = (double) chunk_size[b]; if(chs < 1.0) chs = 1.0;
+			acpt_chunk[b] += (alpha[b] - acpt_chunk[b]) / chs;
+			for(i = 0; i < blocks_size[b]; i++)
+				parbar_chunk[b][i] += (parmgstore[ipar][blocks[b][i]] - parbar_chunk[b][i]) / chs; 
+			if(chunk_size[b] == refresh * blocks_size[b]){
+				refresh_counter[b]++;
+				frac[b] = sqrt(1.0 / ((double)refresh_counter[b] + 1.0));
+				for(i = 0; i < blocks_size[b]; i++){
+					for(j = 0; j < i; j++){
+						S[b][i][j] = (1.0 - frac[b]) * S[b][i][j] + frac[b] * (parbar_chunk[b][i] - mu[b][i]) * (parbar_chunk[b][j] - mu[b][j]);
+						S[b][j][i] = S[b][i][j];
+					}
+					S[b][i][i] = (1.0 - frac[b]) * S[b][i][i] + frac[b] * (parbar_chunk[b][i] - mu[b][i]) * (parbar_chunk[b][i] - mu[b][i]);
+				}
+				chol(R[b], blocks_size[b], 1.0e-8, blocks_pivot[b], blocks_rank + b, blocks_size[b], blocks_d, S[b], 0, 0, 1.0e-10);
+				for(i = 0; i < blocks_size[b]; i++){
+                                  mu[b][i] += frac[b] * (parbar_chunk[b][i] - mu[b][i]);
+                                  parbar_chunk[b][i] = 0.0;
+                                }
+				lm[b] *= exp(frac[b] * (acpt_chunk[b] - acpt_target[b]));
+				acpt_chunk[b] = 0.0;
+				chunk_size[b] = 0;
+			}
+		}
+
+               for(g = 0; g < ngroups; g++){
+                 chs = (double) chunk_gsize[g]; if(chs < 1.0) chs = 1.0;
+		 acpt_group[g] += (alphaCop[g] - acpt_group[g]) / chs;
+	         lgtrbar[g] += (lgtrstore[iparr[g]][g] - lgtrbar[g]) / chs;           
+                 if(chunk_gsize[g] == refreshCop){
+				refreshCop_counter[g]++;
+				fracCop[g] = sqrt(1.0 / ((double)refreshCop_counter[g] + 1.0));
+				phi[g] = sqrt((1.0-fracCop[g])*phi[g]*phi[g] + fracCop[g]*(lgtrbar[g] - theta[g])*(lgtrbar[g] - theta[g]));
+                                theta[g] += fracCop[g] * (lgtrbar[g] - theta[g]);
+                                lmr[g] *= exp(fracCop[g] * (acpt_group[g] - acpt_gtarget[g]));
+                                acpt_group[g] = 0.0;
+                                chunk_gsize[g] = 0;
+                } 
+	 }
+        }
 	PutRNGstate();
-
 }
-
-
-
-
-
-
-
 
 void transform_grid(double *w, double *v, int *ticks, double *dists){
     int l;
@@ -1657,186 +1778,27 @@ double part_trape_rp(double loc, double a, double b, double taua, double taub){
 
 
 
-
-// product of a vector
-double prod(double *x, int n){
-	double a = 1.0;
-	int i;
-	for(i = 0; i < n; i++) a *= x[i];
-	return a;
-}
-
-// global pointers
-
-
-// generate a sample from Wishart_p(df, Sigma) using Bartlett decomposition
-// Odell and Feiveson (1966)
-void rwish(int df, int p, double **Sigma, double **S){
-  //double **R = mymatrix(p, p), **Z = mymatrix(p, p), **Q = mymatrix(p ,p), *d = vect(p);
-  int /* *pivot = ivect(p), *rank = ivect(1), */ i, j; 
-  chol(Rcop, p, 1.0e-8, pivot, rank, p, diagcop, Sigma, 0, 0, 1.0e-10);
-  GetRNGstate();
-  for(i = 0; i < p; i++) Zcop[i][i] = sqrt(rchisq(df - i));
-  for(i = 0; i < p; i++) for(j = i+1; j < p; j++) {
-     Zcop[i][j] = rnorm(0.0, 1.0);
-     Zcop[j][i] = 0.0;
-  }
-  PutRNGstate();
-  mmprod(Zcop, Rcop, Qcop, p, p, p, 0, 0, 0);
-  mInprod(p, p, Qcop, S, 0); 
-  //mmprod(Q, Q, S, p, p, p, 1, 0, 0);
-}
-
-// get the inverse of an upper triangular (n by n) matrix R using back substitution
-void backsolve(int n, double **R, double **Rinv){
-  int i, j, k;
-  for (i = 0; i < n; i++) Rinv[i][i] = 1.0/R[i][i];
-  for (j = 1; j < n; j++) {
-    for (i = j - 1; i >= 0; i--){
-      Rinv[j][i] = 0.0;
-      for (Rinv[i][j] = 0.0, k = i + 1; k <= j; k++){
-        Rinv[i][j] -= R[i][k]*Rinv[k][j];
-      }
-      Rinv[i][j] /= R[i][i];
-    }
-  }
+double lprior(int p, double logitr){
+  odds = exp(logitr);
+  r = odds/(odds + 1.0);
+  deno = (1.0 + (p - 1.0)*r);
+  return((p*(logitr - log(r)) + log((1.0-r)/deno))/2.0 + dlogis(logitr, 0.0, 1.0, 1));
 }
 
 
 
-// generate a sample from InvWishart_p(df, Sigma)
-void riwish(int df, int p, double **Sigma, double **Sinv){
-  //double **R = mymatrix(p, p), **S = mymatrix(p, p), **Rinv = mymatrix(p, p), **Z = mymatrix(p ,p), **Q = mymatrix(p ,p), *d = vect(p);
-  int /* *pivot = ivect(p), *rank = ivect(1),*/ i, j; 
-  chol(Rcop, p, 1.0e-8, pivot, rank, p, diagcop, Sigma, 0, 0, 1.0e-10);
-  backsolve(p, Rcop, Rinvcop);
-  GetRNGstate();
-  for(i = 0; i < p; i++) Zcop[i][i] = sqrt(rchisq(df - i));
-  for(i = 0; i < p; i++) for(j = i+1; j < p; j++) {
-     Zcop[i][j] = rnorm(0.0, 1.0);
-     Zcop[j][i] = 0.0;
-  }
-  PutRNGstate();
-  mmprod(Zcop, Rinvcop, Qcop, p, p, p, 0, 1, 0);
-  mInprod(p, p, Qcop, Scop, 0);
-  //mmprod(Q, Q, S, p, p, p, 1, 0, 0);
-  solvePsd(p, Scop, Sinv);
-}
-
-// matrix inner product: S = X^\top X where X is a n by p matrix
-// transpose = 1: S = XX^\top
-void mInprod(int n, int p, double **X, double **S, int transpose){
-  int i, j, k;
-  if (!transpose){
-    for (i = 0; i < p; i++) for (S[i][i] = 0.0, j = 0; j < n; j++) S[i][i] += X[j][i] * X[j][i];
-    for (i = 0; i < p; i++){
-      for (j = i + 1; j < p; j++){
-        for (S[i][j] = 0.0, k = 0; k < n; k++){ 
-          S[i][j] += X[k][i] * X[k][j];
-          S[j][i] = S[i][j];
-        }
-      }
-    }
-  } else {
-    for (i = 0; i < n; i++) for (S[i][i] = 0.0, j = 0; j < p; j++) S[i][i] += X[i][j] * X[i][j];
-    for (i = 0; i < n; i++){
-      for (j = i + 1; j < n; j++){
-        for (S[i][j] = 0.0, k = 0; k < p; k++){ 
-          S[i][j] += X[i][k] * X[j][k];
-          S[j][i] = S[i][j];
-        }
-      }
-    }
-  }
-}
-
-
-
-// convert a (p by p) covariance matrix Sigma into correlation matrix R
-void cov2cor(int p, double **Sigma, double **R){
-  //double *diag = vect(p);
-  int i, j;
-  for (i = 0; i < p; i++) {diagcop[i] = 1.0/sqrt(Sigma[i][i]); R[i][i] = 1.0;}
-  for (i = 0; i < p; i++) for (j = i + 1; j < p; j++) {
-    R[i][j] = Sigma[i][j] * diagcop[i] * diagcop[j];
-    R[j][i] = R[i][j];
-  }
-}
-
-
-// get the inverse of a (p by p) positive definite matrix S using Cholesky decomposition
-void solvePsd(int p, double **S, double **Sinv){
-  //double **R = mymatrix(p, p), **Rinv = mymatrix(p, p), *d = vect(p);
-  //int *pivot = ivect(p), *rank = ivect(1); 
-  chol(Rcop, p, 1.0e-8, pivot, rank, p, diagcop, S, 0, 0, 1.0e-10);
-  backsolve(p, Rcop, Rinvcop);  
-  mInprod(p, p, Rinvcop, Sinv, 1);
-  //mmprod(Rinv, Rinv, Sinv, p, p, p, 0, 1, 0);
-}
-
-// calculate the determinant of a (p by p) positive semidefinite matrix Sigma using Cholesky decomposition
-// logarithm = 1: get the log(|Sigma|), inv = 1: get |Sigma^{-1}|  
-double detPsd(int p, double **Sigma, int logarithm, int inv){
-   double /* **R = mymatrix(p, p), **O = mymatrix(p, p), **Rinv = mymatrix(p, p), **Z = mymatrix(p ,p), **Q = mymatrix(p ,p), **S = mymatrix(p ,p),  **Omega = mymatrix(p ,p), *d = vect(p),*/ result;
-  int /* *pivot = ivect(p), *rank = ivect(1),*/ i, j; 
-  chol(Rcop, p, 1.0e-8, pivot, rank, p, diagcop, Sigma, 0, 0, 1.0e-10);
-  if (!inv) {
-    if (!logarithm) {
-      for (result = 1.0, i = 0; i < p; i++) result *= Rcop[i][i] * Rcop[i][i];
-    } else {
-        for (result = 0.0, i = 0; i < p; i++) result += log(Rcop[i][i]);
-        result *= 2.0;
-    }
-  } else { 
-      if (!logarithm) {
-        for (result = 1.0, i = 0; i < p; i++) result /= Rcop[i][i]*Rcop[i][i];
-      } else {
-          for (result = 0.0, i = 0; i < p; i++) result += log(Rcop[i][i]);
-          result *= -2.0;
-      }
-    }
-  return(result);
-}
-
-
-// Gaussian copula density (up to a normalizing constant, used for sampling) with (p by p) correlation matrix R
-// x is a vector of marginal quantiles 
-// log = 1: gives log density
-/*
-double gauCopDen(int p, double *x, double **R, int logarithm){
-  double mdSq; // *z = vect(p) , *zn = vect(p), **Q = mymatrix(p, p), **Qinv = mymatrix(p, p), *d = vect(p);
-  int i, j; // *pivot = ivect(p), *rank = ivect(1),  
-  for (i = 0; i < p; i++) {zcop[i] = qnorm(x[i], 0.0, 1.0, 1, 0);}
-  chol(Rcop, p, 1.0e-8, pivot, rank, p, diagcop, R, 0, 0, 1.0e-10);
-  backsolve(p, Rcop, Rinvcop);
-  triprod(Rinvcop, p, p, zcop, zncop, 1);  
-  mdSq = inprod(zncop, zncop, p) - inprod(zcop, zcop, p);
-  if (logarithm){
-    return(-mdSq/2.0);
-  } else{
-      return(exp(-mdSq/2.0));
-  }
-}
-*/
-
-double lprior(int p, double **Cinvchol){
-  double result;
+double lgauCopDen(int p, double *x, double logitr){
   int i;
-  for(result = 0.0, i = 0; i < p; i++) result += log(Cinvchol[i][i]);
-  return result;
-}
-
-
-
-double lgauCopDen(int p, double *x, double **Cinvchol){
-  int i;
-  for(i = 0; i < p; i++) zcop[i] = qnorm(x[i], 0.0, 1.0, 1, 0);
-  triprod(Cinvchol, p, p, zcop, zprod, 1);
-  return (-sumsquares(zprod, p)/2.0 + sumsquares(zcop, p)/2.0);
-}
-
-
-void corInvChol(int p, double **C, double **Cinvchol){
-  chol(Rcop, p, 1.0e-8, pivot, rank, p, diagcop, C, 0, 0, 1.0e-10);
-  backsolve(p, Rcop, Cinvchol);  
+  for(zsumsq = 0.0, i = 0; i < p; i++){
+    zcop[i] = qnorm(x[i], 0.0, 1.0, 1, 0);
+    zsumsq += zcop[i] * zcop[i];
+  }
+  zsum = sum(zcop, p);
+  zsqsum = zsum*zsum;
+  odds = exp(logitr);
+  r = odds/(odds + 1.0);
+  deno = (1.0 + (p - 1.0)*r);
+  return(-odds*(zsumsq - zsqsum/deno)/2.0);
+  //lhwonc = -odds*(zsumsq - zsqsum/deno)/2.0;
+  //return(lhwonc);
 }
